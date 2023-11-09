@@ -1,0 +1,136 @@
+version: '3'
+
+networks:
+  graynet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.0.0/16
+          gateway: 192.168.0.1
+
+# This is how you persist data between container restarts
+volumes:
+  mongo_data:
+    driver: local
+  log_data:
+    driver: local
+  graylog_data:
+    driver: local
+
+services:
+  # Graylog stores configuration in MongoDB
+  mongo:
+    image: mongo:6.0.5-jammy
+    container_name: mongodb
+    volumes:
+      - "mongo_data:/data/db"
+    networks:
+      graynet:
+        ipv4_address: 192.168.0.100
+    restart: unless-stopped
+
+  # The logs themselves are stored in Opensearch
+  opensearch:
+    image: opensearchproject/opensearch:2
+    container_name: opensearch
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - "bootstrap.memory_lock=true"
+      - "discovery.type=single-node"
+      - "action.auto_create_index=false"
+      - "plugins.security.ssl.http.enabled=false"
+      - "plugins.security.disabled=true"
+    volumes:
+      - "log_data:/usr/share/opensearch/data"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - 9200:9200/tcp
+    networks:
+      graynet:
+        ipv4_address: 192.168.0.101
+    restart: unless-stopped
+
+  graylog:
+    image: graylog/graylog:5.1.6
+    container_name: graylog
+    hostname: graylog
+    #extra_hosts:
+    #  node-1: 192.168.0.109
+    environment:
+      # CHANGE ME (must be at least 16 characters)!
+      GRAYLOG_PASSWORD_SECRET: "lPoLt6zPNbWyMSKCBRQryUc-8ESmlC41TimLkcrtSfIRtl5WATMugbYGPUBrGC87cKmZs84v3WU98S8XsV1SkU0uDsdzOmHI"
+      # Password: admin
+      GRAYLOG_ROOT_PASSWORD_SHA2: "ffd58202c8681f3e029f536f5ba81b63b5533fe281cf13b618f883751cb0568f"
+      GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
+      GRAYLOG_HTTP_EXTERNAL_URI: "http://localhost:9000/"
+      GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
+      GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      GRAYLOG_ROOT_TIMEZONE: "Europe/Kiev"
+      TZ: "Europe/Kiev"
+      GRAYLOG_TRANSPORT_EMAIL_PROTOCOL: "smtp"
+      GRAYLOG_TRANSPORT_EMAIL_WEB_INTERFACE_URL: "http://graylog.colocall.net/"
+      GRAYLOG_TRANSPORT_EMAIL_HOSTNAME: "smtp.call"
+      GRAYLOG_TRANSPORT_EMAIL_ENABLED: "true"
+      GRAYLOG_TRANSPORT_EMAIL_PORT: "25"
+      GRAYLOG_TRANSPORT_EMAIL_USE_AUTH: "false"
+      #GRAYLOG_TRANSPORT_EMAIL_AUTH_USERNAME: "xxxxx"
+      #GRAYLOG_TRANSPORT_EMAIL_AUTH_PASSWORD: "xxxxx"
+      GRAYLOG_TRANSPORT_EMAIL_USE_TLS: "false"
+      GRAYLOG_TRANSPORT_EMAIL_USE_SSL: "false"
+      GRAYLOG_TRANSPORT_FROM_EMAIL: "root@graylog.call"
+      GRAYLOG_TRANSPORT_SUBJECT_PREFIX: "[graylog]"
+
+    entrypoint: /usr/bin/tini -- wait-for-it opensearch:9200 -- /docker-entrypoint.sh
+    volumes:
+      - "/usr/local/share/graylog-docker/ssl:/usr/share/graylog/ssl"
+      - "/usr/local/share/graylog-docker/config:/usr/share/graylog/config"
+      - "graylog_data:/usr/share/graylog/data"
+    networks:
+      graynet:
+        ipv4_address: 192.168.0.102
+    restart: always
+    depends_on:
+      opensearch:
+        condition: "service_started"
+      mongo:
+        condition: "service_started"
+    ports:
+      - 5044:5044/tcp   # journalbeat
+      - 9000:9000/tcp   # Graylog web interface and REST API
+      - 1514:1514/tcp   # Syslog
+      - 1514:1514/udp   # Syslog
+      #- 12201:12201/tcp # GELF
+      #- 12201:12201/udp # GELF
+
+  nginx:
+    container_name: nginx
+    hostname: nginx
+    image: nginx
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - "./data/certbot/conf:/etc/letsencrypt"
+      - "./data/certbot/www:/var/www/certbot"
+      - "./data/nginx:/etc/nginx"
+    networks:
+      graynet:
+        ipv4_address: 192.168.0.2
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    volumes:
+      - "./data/certbot/conf:/etc/letsencrypt"
+      - "./data/certbot/www:/var/www/certbot"
+    networks:
+      graynet:
+        ipv4_address: 192.168.0.3
